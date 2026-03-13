@@ -19,6 +19,7 @@ export interface HistoryEntry {
   clearedColors: Color[];
   movesLeft: number;
   score: number;
+  hasAddedBottle: boolean;
 }
 
 export type GameView = 'home' | 'game' | 'levels' | 'profile';
@@ -31,11 +32,16 @@ export interface UserProfile {
   joinDate: string;
 }
 
+export type Difficulty = 'easy' | 'medium' | 'hard';
+export type Scene = 'colors' | 'math' | 'english' | 'literacy';
+
 export interface GameState {
   bottles: BottleData[];
   selectedBottleId: number | null;
   moveHistory: HistoryEntry[];
   level: number;
+  difficulty: Difficulty;
+  scene: Scene;
   status: GameStatus;
   movesLeft: number;
   score: number;
@@ -44,4 +50,7 @@ export interface GameState {
   view: GameView;
   unlockedLevels: number;
   userProfile: UserProfile;
+  hasAddedBottle: boolean;
+  capacity: number;
+  levelColors: Color[];
 }

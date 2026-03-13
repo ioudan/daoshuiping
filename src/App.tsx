@@ -5,10 +5,10 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { RefreshCw, Undo2, Trophy, Play, ChevronRight, Info, Sparkles, AlertCircle, ListOrdered, History, ShoppingBag, CheckCircle2 } from 'lucide-react';
+import { RefreshCw, Undo2, Trophy, Play, ChevronRight, Info, Sparkles, AlertCircle, ListOrdered, History, ShoppingBag, CheckCircle2, Plus } from 'lucide-react';
 import confetti from 'canvas-confetti';
-import { Color, BottleData, GameState, ScoreEntry, GameStatus, GameView, UserProfile } from './types';
-import { COLOR_DATA, BOTTLE_CAPACITY, GAME_CONFIG } from './constants';
+import { Color, BottleData, GameState, ScoreEntry, GameStatus, GameView, UserProfile, Difficulty, Scene } from './types';
+import { DIFFICULTY_SETTINGS, SCENE_CONTENT, COLOR_DATA, GAME_CONFIG } from './constants';
 import { Home, Lock, User, Award, ArrowLeft, Star } from 'lucide-react';
 
 // --- Sound Engine ---
@@ -75,12 +75,38 @@ const playSound = (type: 'pour' | 'win' | 'fail' | 'select' | 'clear') => {
   }
 };
 
+const speak = (text: string, secondaryText?: string, forceLang?: 'zh-CN' | 'en-US') => {
+  if ('speechSynthesis' in window) {
+    window.speechSynthesis.cancel();
+    
+    const utter = (t: string, langOverride?: string) => {
+      const utterance = new SpeechSynthesisUtterance(t);
+      const isChinese = /[\u4e00-\u9fa5]/.test(t);
+      utterance.lang = langOverride || (isChinese ? 'zh-CN' : 'en-US');
+      utterance.rate = 0.85; // Slightly slower for better clarity
+      utterance.pitch = 1.1;
+      return utterance;
+    };
+
+    const first = utter(text, forceLang);
+    if (secondaryText) {
+      first.onend = () => {
+        const second = utter(secondaryText, forceLang);
+        window.speechSynthesis.speak(second);
+      };
+    }
+    window.speechSynthesis.speak(first);
+  }
+};
+
 const App: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>({
     bottles: [],
     selectedBottleId: null,
     moveHistory: [],
     level: 1,
+    difficulty: 'easy',
+    scene: 'colors',
     status: 'playing',
     movesLeft: GAME_CONFIG.initialMoves,
     score: 0,
@@ -88,6 +114,9 @@ const App: React.FC = () => {
     clearedColors: [],
     view: 'home',
     unlockedLevels: 1,
+    hasAddedBottle: false,
+    capacity: DIFFICULTY_SETTINGS.easy.capacity,
+    levelColors: [],
     userProfile: {
       name: `小水滴 ${Math.floor(Math.random() * 1000)}`,
       avatar: '💧',
@@ -134,17 +163,33 @@ const App: React.FC = () => {
   }, []);
 
   // Initialize Level
-  const initLevel = useCallback((level: number, currentScore: number = 0) => {
-    const colorsCount = Math.min(level + 1, COLOR_DATA.length);
+  const initLevel = useCallback((level: number, currentScore: number = 0, difficulty?: Difficulty, scene?: Scene) => {
+    const activeDifficulty = difficulty || gameState.difficulty;
+    const activeScene = scene || gameState.scene;
+    
+    const settings = DIFFICULTY_SETTINGS[activeDifficulty];
+    
+    // Scale colors with level
+    const colorsCount = Math.min(
+      settings.maxColors,
+      settings.minColors + Math.floor((level - 1) / 2)
+    );
+    
     const emptyBottles = 2;
+    
+    // Pick random colors from COLOR_DATA
+    const shuffledColorData = [...COLOR_DATA].sort(() => Math.random() - 0.5);
+    const selectedColorData = shuffledColorData.slice(0, colorsCount);
+    const selectedColors = selectedColorData.map(d => d.color);
     
     let pool: Color[] = [];
     for (let i = 0; i < colorsCount; i++) {
-      for (let j = 0; j < BOTTLE_CAPACITY; j++) {
-        pool.push(COLOR_DATA[i].color);
+      for (let j = 0; j < settings.capacity; j++) {
+        pool.push(selectedColors[i]);
       }
     }
 
+    // Shuffle pool
     for (let i = pool.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [pool[i], pool[j]] = [pool[j], pool[i]];
@@ -154,7 +199,7 @@ const App: React.FC = () => {
     for (let i = 0; i < colorsCount; i++) {
       newBottles.push({
         id: i,
-        colors: pool.slice(i * BOTTLE_CAPACITY, (i + 1) * BOTTLE_CAPACITY),
+        colors: pool.slice(i * settings.capacity, (i + 1) * settings.capacity),
       });
     }
 
@@ -171,15 +216,20 @@ const App: React.FC = () => {
       selectedBottleId: null,
       moveHistory: [],
       level,
+      difficulty: activeDifficulty,
+      scene: activeScene,
+      capacity: settings.capacity,
+      levelColors: selectedColors,
       status: 'playing',
-      movesLeft: GAME_CONFIG.initialMoves + (level - 1) * GAME_CONFIG.movesPerLevel,
+      movesLeft: settings.baseMoves + (level - 1) * GAME_CONFIG.movesPerLevel,
       score: currentScore,
       clearedColors: [],
       view: 'game',
+      hasAddedBottle: false,
     }));
     setShowWinModal(false);
     setShowLoseModal(false);
-  }, []);
+  }, [gameState.difficulty, gameState.scene]);
 
   useEffect(() => {
     initLevel(1);
@@ -190,11 +240,31 @@ const App: React.FC = () => {
     if (gameState.bottles.length === 0 || gameState.status !== 'playing') return;
 
     // Win condition: All colors present in the level are cleared into bags
-    const colorsInLevel = Math.min(gameState.level + 1, COLOR_DATA.length);
-    const isWon = gameState.clearedColors.length === colorsInLevel;
+    const isWon = gameState.levelColors.length > 0 && gameState.clearedColors.length === gameState.levelColors.length;
 
     if (isWon) {
       playSound('win');
+      speak('太棒了！你赢了！', 'Excellent! You won!');
+      
+      // Fireworks effect
+      const duration = 5 * 1000;
+      const animationEnd = Date.now() + duration;
+      const defaults = { startVelocity: 30, spread: 360, ticks: 60, zIndex: 0 };
+
+      const randomInRange = (min: number, max: number) => Math.random() * (max - min) + min;
+
+      const interval: any = setInterval(function() {
+        const timeLeft = animationEnd - Date.now();
+
+        if (timeLeft <= 0) {
+          return clearInterval(interval);
+        }
+
+        const particleCount = 50 * (timeLeft / duration);
+        confetti({ ...defaults, particleCount, origin: { x: randomInRange(0.1, 0.3), y: Math.random() - 0.2 } });
+        confetti({ ...defaults, particleCount, origin: { x: randomInRange(0.7, 0.9), y: Math.random() - 0.2 } });
+      }, 250);
+
       confetti({
         particleCount: 150,
         spread: 70,
@@ -235,7 +305,13 @@ const App: React.FC = () => {
     if (gameState.selectedBottleId === null) {
       if (gameState.bottles[id].colors.length > 0) {
         playSound('select');
+        const topColor = gameState.bottles[id].colors[gameState.bottles[id].colors.length - 1];
+        const { first, second } = getVoiceContentForColor(topColor);
+        const forceLang = gameState.scene === 'literacy' ? 'zh-CN' : undefined;
+        speak(first, second, forceLang);
         setGameState(prev => ({ ...prev, selectedBottleId: id }));
+      } else {
+        speak('空瓶子', 'Empty bottle');
       }
     } else if (gameState.selectedBottleId === id) {
       setGameState(prev => ({ ...prev, selectedBottleId: null }));
@@ -250,7 +326,7 @@ const App: React.FC = () => {
     const source = gameState.bottles[gameState.selectedBottleId];
     
     // Check if bottle is full and has only one color
-    const isFullAndUniform = source.colors.length === BOTTLE_CAPACITY && 
+    const isFullAndUniform = source.colors.length === gameState.capacity && 
                              source.colors.every(c => c === color);
 
     if (isFullAndUniform) {
@@ -263,6 +339,9 @@ const App: React.FC = () => {
 
       // Clear the bottle and add to clearedColors
       playSound('clear');
+      const { first, second } = getVoiceContentForColor(color);
+      const forceLang = gameState.scene === 'literacy' ? 'zh-CN' : undefined;
+      speak(first, second, forceLang);
       
       const newBottles = gameState.bottles.map(b => {
         if (b.id === gameState.selectedBottleId) {
@@ -281,7 +360,8 @@ const App: React.FC = () => {
           bottles: prev.bottles,
           clearedColors: prev.clearedColors,
           movesLeft: prev.movesLeft,
-          score: prev.score
+          score: prev.score,
+          hasAddedBottle: prev.hasAddedBottle
         }],
       }));
 
@@ -311,16 +391,13 @@ const App: React.FC = () => {
     const target = gameState.bottles[targetId];
 
     if (source.colors.length === 0) return;
-    if (target.colors.length === BOTTLE_CAPACITY) return;
+    if (target.colors.length === gameState.capacity) {
+      speak('瓶子满了');
+      return;
+    }
 
     const sourceTopColor = source.colors[source.colors.length - 1];
     const targetTopColor = target.colors.length > 0 ? target.colors[target.colors.length - 1] : null;
-
-    if (targetTopColor !== null && sourceTopColor !== targetTopColor) {
-      playSound('fail');
-      setGameState(prev => ({ ...prev, selectedBottleId: null }));
-      return;
-    }
 
     let unitsToPour = 0;
     for (let i = source.colors.length - 1; i >= 0; i--) {
@@ -331,11 +408,15 @@ const App: React.FC = () => {
       }
     }
 
-    const spaceInTarget = BOTTLE_CAPACITY - target.colors.length;
+    const spaceInTarget = gameState.capacity - target.colors.length;
     const actualPour = Math.min(unitsToPour, spaceInTarget);
 
     if (actualPour > 0) {
       playSound('pour');
+      const { first, second } = getVoiceContentForColor(sourceTopColor);
+      const forceLang = gameState.scene === 'literacy' ? 'zh-CN' : undefined;
+      speak(first, second, forceLang);
+
       const newBottles = gameState.bottles.map(b => {
         if (b.id === sourceId) {
           return { ...b, colors: b.colors.slice(0, b.colors.length - actualPour) };
@@ -357,7 +438,8 @@ const App: React.FC = () => {
           bottles: prev.bottles,
           clearedColors: prev.clearedColors,
           movesLeft: prev.movesLeft,
-          score: prev.score
+          score: prev.score,
+          hasAddedBottle: prev.hasAddedBottle
         }],
       }));
     } else {
@@ -374,8 +456,32 @@ const App: React.FC = () => {
       clearedColors: lastEntry.clearedColors,
       movesLeft: lastEntry.movesLeft,
       score: lastEntry.score,
+      hasAddedBottle: lastEntry.hasAddedBottle,
       moveHistory: prev.moveHistory.slice(0, -1),
       selectedBottleId: null,
+    }));
+  };
+
+  const addExtraBottle = () => {
+    if (gameState.hasAddedBottle || gameState.status !== 'playing') return;
+    
+    playSound('select');
+    const newBottle: BottleData = {
+      id: gameState.bottles.length,
+      colors: [],
+    };
+
+    setGameState(prev => ({
+      ...prev,
+      bottles: [...prev.bottles, newBottle],
+      hasAddedBottle: true,
+      moveHistory: [...prev.moveHistory, {
+        bottles: prev.bottles,
+        clearedColors: prev.clearedColors,
+        movesLeft: prev.movesLeft,
+        score: prev.score,
+        hasAddedBottle: prev.hasAddedBottle
+      }],
     }));
   };
 
@@ -395,40 +501,146 @@ const App: React.FC = () => {
     return COLOR_DATA.find(d => d.color === color)?.icon || '';
   };
 
-  const colorsInLevel = COLOR_DATA.slice(0, Math.min(gameState.level + 1, COLOR_DATA.length));
+  const colorsInLevel = gameState.levelColors.map(color => {
+    return COLOR_DATA.find(d => d.color === color)!;
+  });
+
+  const getContentForColor = (color: string) => {
+    const colorData = COLOR_DATA.find(d => d.color === color);
+    if (!colorData) return '';
+
+    if (gameState.scene === 'colors') return colorData.zhName;
+
+    const sceneData = SCENE_CONTENT[gameState.scene]?.[gameState.difficulty];
+    if (!sceneData) return '';
+
+    const colorIndex = gameState.levelColors.indexOf(color);
+    if (colorIndex === -1) return '';
+
+    const item = sceneData[colorIndex % sceneData.length];
+    return item.primary;
+  };
+
+  const getVoiceContentForColor = (color: string) => {
+    const colorData = COLOR_DATA.find(d => d.color === color);
+    if (!colorData) return { first: '', second: '' };
+
+    if (gameState.scene === 'colors') {
+      return { first: colorData.zhName, second: colorData.name };
+    }
+
+    const sceneData = SCENE_CONTENT[gameState.scene]?.[gameState.difficulty];
+    if (!sceneData) return { first: '', second: '' };
+
+    const colorIndex = gameState.levelColors.indexOf(color);
+    if (colorIndex === -1) return { first: '', second: '' };
+
+    const item = sceneData[colorIndex % sceneData.length];
+    
+    // For literacy, primary is character, secondary is pinyin
+    // For others, primary is English/Math, secondary is Chinese explanation
+    return { first: item.primary, second: item.secondary };
+  };
 
   const HomeView = () => (
-    <div className="min-h-screen flex flex-col items-center justify-center p-4 sm:p-6 bg-gradient-to-b from-[#FFFBEB] to-white overflow-hidden">
+    <div className="min-h-screen flex flex-col items-center justify-center p-4 sm:p-6 bg-gradient-to-b from-[#FFFBEB] to-white overflow-y-auto">
       <motion.div 
         initial={{ y: -50, opacity: 0 }} animate={{ y: 0, opacity: 1 }}
-        className="text-center mb-8 sm:mb-12"
+        className="text-center mb-6 sm:mb-8"
       >
-        <div className="w-20 h-20 sm:w-24 sm:h-24 bg-pink-400 rounded-[28px] sm:rounded-[32px] flex items-center justify-center mx-auto mb-4 sm:mb-6 shadow-xl shadow-pink-200">
-          <Sparkles className="w-10 h-10 sm:w-12 sm:h-12 text-white" />
+        <div className="w-16 h-16 sm:w-20 sm:h-20 bg-pink-400 rounded-[24px] sm:rounded-[28px] flex items-center justify-center mx-auto mb-3 sm:mb-4 shadow-xl shadow-pink-200">
+          <Sparkles className="w-8 h-8 sm:w-10 sm:h-10 text-white" />
         </div>
-        <h1 className="text-4xl sm:text-5xl font-black text-slate-900 mb-2 sm:mb-4 tracking-tight">开心倒水水</h1>
-        <p className="text-slate-500 font-bold text-sm sm:text-base">色彩缤纷的益智挑战</p>
+        <h1 className="text-3xl sm:text-4xl font-black text-slate-900 mb-1 sm:mb-2 tracking-tight">开心倒水水</h1>
+        <p className="text-slate-500 font-bold text-xs sm:text-sm">色彩缤纷的益智挑战</p>
       </motion.div>
 
-      <div className="flex flex-col gap-3 sm:gap-4 w-full max-w-[280px] sm:max-w-xs">
-        <button 
-          onClick={() => initLevel(gameState.unlockedLevels)}
-          className="py-4 sm:py-5 bg-pink-500 hover:bg-pink-400 text-white rounded-2xl sm:rounded-3xl font-black text-lg sm:text-xl transition-all shadow-xl shadow-pink-200 active:scale-95 flex items-center justify-center gap-3"
-        >
-          <Play className="w-5 h-5 sm:w-6 sm:h-6 fill-current" /> 继续游戏
-        </button>
-        <button 
-          onClick={() => setGameState(prev => ({ ...prev, view: 'levels' }))}
-          className="py-4 sm:py-5 bg-white hover:bg-slate-50 text-slate-800 rounded-2xl sm:rounded-3xl font-black text-lg sm:text-xl transition-all border-4 border-amber-200 shadow-lg active:scale-95 flex items-center justify-center gap-3"
-        >
-          <Trophy className="w-5 h-5 sm:w-6 sm:h-6 text-amber-500" /> 选择关卡
-        </button>
-        <button 
-          onClick={() => setGameState(prev => ({ ...prev, view: 'profile' }))}
-          className="py-4 sm:py-5 bg-white hover:bg-slate-50 text-slate-800 rounded-2xl sm:rounded-3xl font-black text-lg sm:text-xl transition-all border-4 border-blue-200 shadow-lg active:scale-95 flex items-center justify-center gap-3"
-        >
-          <User className="w-5 h-5 sm:w-6 sm:h-6 text-blue-500" /> 个人中心
-        </button>
+      <div className="w-full max-w-md space-y-6">
+        {/* Difficulty Selection */}
+        <div className="space-y-3">
+          <p className="text-center font-black text-slate-700 text-sm uppercase tracking-wider">选择难度</p>
+          <div className="grid grid-cols-3 gap-2">
+            {(['easy', 'medium', 'hard'] as Difficulty[]).map((d) => (
+              <button
+                key={d}
+                onClick={() => {
+                  speak(DIFFICULTY_SETTINGS[d].label, d === 'easy' ? 'Easy' : d === 'medium' ? 'Medium' : 'Hard');
+                  setGameState(prev => ({ ...prev, difficulty: d }));
+                }}
+                className={`py-3 rounded-xl font-black text-xs transition-all border-2 ${
+                  gameState.difficulty === d 
+                    ? 'bg-pink-500 border-pink-600 text-white shadow-md scale-105' 
+                    : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                {DIFFICULTY_SETTINGS[d].label.split(' ')[0]}
+                <br />
+                <span className="text-[9px] opacity-80">{DIFFICULTY_SETTINGS[d].label.split(' ')[1]}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Scene Selection */}
+        <div className="space-y-3">
+          <p className="text-center font-black text-slate-700 text-sm uppercase tracking-wider">选择场景</p>
+          <div className="grid grid-cols-2 gap-2">
+            {[
+              { id: 'colors', label: '缤纷色彩', icon: '🎨' },
+              { id: 'math', label: '趣味数学', icon: '🔢' },
+              { id: 'english', label: '快乐英语', icon: '🔤' },
+              { id: 'literacy', label: '儿童识字', icon: '🏮' }
+            ].map((s) => (
+              <button
+                key={s.id}
+                onClick={() => {
+                  speak(s.label, s.id === 'colors' ? 'Colors' : s.id === 'math' ? 'Math' : s.id === 'english' ? 'English' : 'Literacy');
+                  setGameState(prev => ({ ...prev, scene: s.id as Scene }));
+                }}
+                className={`py-3 rounded-xl font-black text-xs transition-all border-2 flex flex-col items-center gap-1 ${
+                  gameState.scene === s.id 
+                    ? 'bg-blue-500 border-blue-600 text-white shadow-md scale-105' 
+                    : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                <span className="text-lg">{s.icon}</span>
+                {s.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-3 pt-4">
+          <button 
+            onClick={() => {
+              speak('开始挑战', 'Start Challenge');
+              initLevel(gameState.unlockedLevels);
+            }}
+            className="py-4 bg-pink-500 hover:bg-pink-400 text-white rounded-2xl font-black text-lg transition-all shadow-xl shadow-pink-200 active:scale-95 flex items-center justify-center gap-3"
+          >
+            <Play className="w-5 h-5 fill-current" /> 开始挑战
+          </button>
+          <div className="grid grid-cols-2 gap-3">
+            <button 
+              onClick={() => {
+                speak('选择关卡', 'Select Level');
+                setGameState(prev => ({ ...prev, view: 'levels' }));
+              }}
+              className="py-3 bg-white hover:bg-slate-50 text-slate-800 rounded-2xl font-black text-sm transition-all border-4 border-amber-200 shadow-lg active:scale-95 flex items-center justify-center gap-2"
+            >
+              <Trophy className="w-4 h-4 text-amber-500" /> 选择关卡
+            </button>
+            <button 
+              onClick={() => {
+                speak('个人中心', 'Profile Center');
+                setGameState(prev => ({ ...prev, view: 'profile' }));
+              }}
+              className="py-3 bg-white hover:bg-slate-50 text-slate-800 rounded-2xl font-black text-sm transition-all border-4 border-blue-200 shadow-lg active:scale-95 flex items-center justify-center gap-2"
+            >
+              <User className="w-4 h-4 text-blue-500" /> 个人中心
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -437,7 +649,10 @@ const App: React.FC = () => {
     <div className="min-h-screen bg-[#FFFBEB] p-4 sm:p-6">
       <header className="max-w-4xl mx-auto flex items-center gap-3 sm:gap-4 mb-6 sm:mb-10">
         <button 
-          onClick={() => setGameState(prev => ({ ...prev, view: 'home' }))}
+          onClick={() => {
+            speak('返回首页', 'Back to Home');
+            setGameState(prev => ({ ...prev, view: 'home' }));
+          }}
           className="p-2 sm:p-3 bg-white rounded-xl sm:rounded-2xl border-2 border-slate-200 shadow-sm active:scale-90"
         >
           <ArrowLeft className="w-5 h-5 sm:w-6 sm:h-6" />
@@ -454,7 +669,14 @@ const App: React.FC = () => {
               key={levelNum}
               whileHover={isUnlocked ? { scale: 1.05 } : {}}
               whileTap={isUnlocked ? { scale: 0.95 } : {}}
-              onClick={() => isUnlocked && initLevel(levelNum)}
+              onClick={() => {
+                if (isUnlocked) {
+                  speak(`第 ${levelNum} 关`);
+                  initLevel(levelNum);
+                } else {
+                  speak('关卡未解锁');
+                }
+              }}
               className={`
                 aspect-square rounded-2xl sm:rounded-3xl border-2 sm:border-4 flex flex-col items-center justify-center gap-1 sm:gap-2 transition-all
                 ${isUnlocked 
@@ -485,7 +707,10 @@ const App: React.FC = () => {
     <div className="min-h-screen bg-[#FFFBEB] p-4 sm:p-6">
       <header className="max-w-4xl mx-auto flex items-center gap-3 sm:gap-4 mb-6 sm:mb-10">
         <button 
-          onClick={() => setGameState(prev => ({ ...prev, view: 'home' }))}
+          onClick={() => {
+            speak('返回首页', 'Back to Home');
+            setGameState(prev => ({ ...prev, view: 'home' }));
+          }}
           className="p-2 sm:p-3 bg-white rounded-xl sm:rounded-2xl border-2 border-slate-200 shadow-sm active:scale-90"
         >
           <ArrowLeft className="w-5 h-5 sm:w-6 sm:h-6" />
@@ -542,17 +767,50 @@ const App: React.FC = () => {
     </div>
   );
 
+  const Buntings = () => (
+    <div className="absolute top-0 left-0 w-full flex justify-around pointer-events-none overflow-hidden h-16 z-10">
+      {Array.from({ length: 12 }).map((_, i) => (
+        <motion.div
+          key={i}
+          initial={{ y: -20, rotate: -10 }}
+          animate={{ y: 0, rotate: 10 }}
+          transition={{
+            repeat: Infinity,
+            repeatType: "reverse",
+            duration: 1 + Math.random(),
+            delay: Math.random()
+          }}
+          className="w-8 h-10"
+          style={{
+            backgroundColor: COLOR_DATA[i % COLOR_DATA.length].color,
+            clipPath: "polygon(0% 0%, 100% 0%, 50% 100%)",
+            opacity: 0.8
+          }}
+        />
+      ))}
+    </div>
+  );
+
   if (gameState.view === 'home') return <HomeView />;
   if (gameState.view === 'levels') return <LevelsView />;
   if (gameState.view === 'profile') return <ProfileView />;
 
   return (
-    <div className="min-h-screen bg-[#FFFBEB] text-slate-800 font-sans selection:bg-pink-200 overflow-x-hidden flex flex-col">
+    <div className="min-h-screen bg-[#F0F9FF] text-slate-800 font-sans selection:bg-pink-200 overflow-x-hidden flex flex-col relative">
+      {/* Background Pattern */}
+      <div className="absolute inset-0 opacity-5 pointer-events-none" 
+           style={{ backgroundImage: 'radial-gradient(#000 1px, transparent 1px)', backgroundSize: '20px 20px' }} />
+      
+      <Buntings />
+
       {/* Playful Header */}
-      <header className="p-3 sm:p-4 md:p-6 flex justify-between items-center border-b-4 border-amber-200 bg-white sticky top-0 z-10 shadow-sm">
+      <header className="p-3 sm:p-4 md:p-6 flex justify-between items-center border-b-4 border-blue-200 bg-white/80 backdrop-blur-md sticky top-0 z-20 shadow-sm">
         <div className="flex items-center gap-2 sm:gap-3 md:gap-4">
           <button 
-            onClick={() => setGameState(prev => ({ ...prev, view: 'home' }))}
+            onClick={() => {
+              speak('返回首页');
+              setGameState(prev => ({ ...prev, view: 'home' }));
+            }}
             className="p-2 bg-slate-50 rounded-xl border border-slate-200 active:scale-90"
           >
             <Home className="w-4 h-4 sm:w-5 sm:h-5 text-slate-600" />
@@ -568,21 +826,42 @@ const App: React.FC = () => {
         
         <div className="flex gap-1.5 sm:gap-2 md:gap-3">
           <button 
-            onClick={() => setShowLeaderboard(true)}
+            onClick={() => {
+              speak('排行榜');
+              setShowLeaderboard(true);
+            }}
             className="p-2 sm:p-2.5 md:p-3 rounded-xl sm:rounded-2xl bg-white hover:bg-slate-50 transition-all active:scale-90 border-2 border-slate-200 shadow-sm"
             title="排行榜"
           >
             <ListOrdered className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6 text-slate-600" />
           </button>
           <button 
-            onClick={undoMove}
+            onClick={() => {
+              speak('增加瓶子', 'Add Bottle');
+              addExtraBottle();
+            }}
+            disabled={gameState.hasAddedBottle || gameState.status !== 'playing'}
+            className="p-2 sm:p-2.5 md:p-3 rounded-xl sm:rounded-2xl bg-white hover:bg-slate-50 disabled:opacity-30 transition-all active:scale-90 border-2 border-slate-200 shadow-sm flex items-center gap-2"
+            title="增加瓶子"
+          >
+            <Plus className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6 text-slate-600" />
+            <span className="hidden sm:inline text-xs font-bold text-slate-500">增加瓶子</span>
+          </button>
+          <button 
+            onClick={() => {
+              speak('撤销', 'Undo');
+              undoMove();
+            }}
             disabled={gameState.moveHistory.length === 0 || gameState.status !== 'playing'}
             className="p-2 sm:p-2.5 md:p-3 rounded-xl sm:rounded-2xl bg-white hover:bg-slate-50 disabled:opacity-30 transition-all active:scale-90 border-2 border-slate-200 shadow-sm"
           >
             <Undo2 className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6 text-slate-600" />
           </button>
           <button 
-            onClick={resetLevel}
+            onClick={() => {
+              speak('重新开始', 'Restart Level');
+              resetLevel();
+            }}
             className="p-2 sm:p-2.5 md:p-3 rounded-xl sm:rounded-2xl bg-white hover:bg-slate-50 transition-all active:scale-90 border-2 border-slate-200 shadow-sm"
           >
             <RefreshCw className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6 text-slate-600" />
@@ -599,7 +878,12 @@ const App: React.FC = () => {
               <motion.div
                 key={data.color}
                 id={`bag-${data.color}`}
-                onClick={() => handleBagClick(data.color)}
+                onClick={() => {
+                  const { first, second } = getVoiceContentForColor(data.color);
+                  const forceLang = gameState.scene === 'literacy' ? 'zh-CN' : undefined;
+                  speak(first, second, forceLang);
+                  handleBagClick(data.color);
+                }}
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
                 className={`
@@ -609,12 +893,24 @@ const App: React.FC = () => {
                 `}
               >
                 <div 
-                  className="w-7 h-7 sm:w-10 sm:h-10 rounded-full flex items-center justify-center text-sm sm:text-xl shadow-inner"
+                  className="w-7 h-7 sm:w-10 sm:h-10 rounded-full flex items-center justify-center text-sm sm:text-xl shadow-inner overflow-hidden"
                   style={{ backgroundColor: data.color }}
                 >
-                  {isCleared ? <CheckCircle2 className="w-4 h-4 sm:w-6 sm:h-6 text-white" /> : <ShoppingBag className="w-4 h-4 sm:w-6 sm:h-6 text-white" />}
+                  {isCleared ? (
+                    <CheckCircle2 className="w-4 h-4 sm:w-6 sm:h-6 text-white" />
+                  ) : (
+                    gameState.scene === 'colors' ? (
+                      <ShoppingBag className="w-4 h-4 sm:w-6 sm:h-6 text-white" />
+                    ) : (
+                      <span className="text-[10px] sm:text-xs font-black text-white px-1 text-center leading-tight">
+                        {getContentForColor(data.color)}
+                      </span>
+                    )
+                  )}
                 </div>
-                <span className="text-[8px] sm:text-[10px] font-black uppercase text-slate-500 whitespace-nowrap">{data.icon} {data.name}</span>
+                <span className="text-[8px] sm:text-[10px] font-black uppercase text-slate-500 whitespace-nowrap">
+                  {gameState.scene === 'colors' ? `${data.icon} ${data.zhName}` : `收集袋 ${colorsInLevel.indexOf(data) + 1}`}
+                </span>
                 {isCleared && <div className="absolute -top-1 -right-1 bg-green-500 text-white rounded-full p-0.5"><CheckCircle2 className="w-3 h-3" /></div>}
               </motion.div>
             );
@@ -659,13 +955,20 @@ const App: React.FC = () => {
                     <motion.div
                       key={`${bottle.id}-${idx}`}
                       initial={{ height: 0 }}
-                      animate={{ height: '25%' }}
+                      animate={{ height: `${100 / gameState.capacity}%` }}
                       style={{ backgroundColor: color }}
                       className="w-full flex items-center justify-center border-t border-white/20 relative"
                     >
-                      <span className="text-base sm:text-xl md:text-2xl drop-shadow-md select-none">
-                        {getIconForColor(color)}
-                      </span>
+                      {gameState.scene !== 'colors' && (
+                        <span className="text-[10px] sm:text-xs md:text-sm font-black text-white/90 drop-shadow-md text-center px-1 leading-tight">
+                          {getContentForColor(color)}
+                        </span>
+                      )}
+                      {gameState.scene === 'colors' && (
+                        <span className="text-base sm:text-xl md:text-2xl drop-shadow-md select-none">
+                          {getIconForColor(color)}
+                        </span>
+                      )}
                       <div className="absolute inset-0 opacity-20 pointer-events-none">
                         <div className="absolute top-1 left-1.5 w-1.5 h-1.5 bg-white rounded-full" />
                         <div className="absolute bottom-1.5 right-2 w-1 h-1 bg-white rounded-full" />
